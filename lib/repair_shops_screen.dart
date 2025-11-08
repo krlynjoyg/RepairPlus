@@ -117,7 +117,6 @@ class _RepairShopsScreenState extends State<RepairShopsScreen>
       node["service"="electronics_repair"](around:$radiusMeters,$lat,$lon);
       node["service"="mobile_phone_repair"](around:$radiusMeters,$lat,$lon);
       node["service"="computer_repair"](around:$radiusMeters,$lat,$lon);
-      // ✅ Additional repair-related categories
       node["shop"="car_repair"](around:$radiusMeters,$lat,$lon);
       node["shop"="bicycle"](around:$radiusMeters,$lat,$lon);
       node["service"="repair"](around:$radiusMeters,$lat,$lon);
