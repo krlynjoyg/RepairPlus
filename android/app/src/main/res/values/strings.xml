@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">repair_plus_one</string>
+
+    <!-- 🔹 Your Facebook App Info -->
+    <string name="facebook_app_id">816203184706219</string>
+    <string name="facebook_client_token">bdd3fe4b15c85603bd412fb6d250dcf0</string>
+    <string name="fb_login_protocol_scheme">fb816203184706219</string>
+</resources>

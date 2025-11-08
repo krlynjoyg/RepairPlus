@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "629825817349",
+    "project_id": "repairplus-663e1",
+    "storage_bucket": "repairplus-663e1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:629825817349:android:11d718b20008da7b90856c",
+        "android_client_info": {
+          "package_name": "com.example.repair_plus_one"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "629825817349-73rjju525r44bmeaj9u8ko412l7cef1d.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.repair_plus_one",
+            "certificate_hash": "b0d75233e3caf48232f94f6019e9ff2b93170046"
+          }
+        },
+        {
+          "client_id": "629825817349-tm07r9mi098oug7aqjirn8ff7n7q6t7a.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCtSqMEKHTDQw0aYmMuo30xm4-7uLuTr24"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "629825817349-tm07r9mi098oug7aqjirn8ff7n7q6t7a.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

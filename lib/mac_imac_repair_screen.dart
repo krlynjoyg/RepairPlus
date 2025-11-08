@@ -1,620 +1,566 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/foundation.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'services/phone_tutorial_service.dart';
 
-class MacImacRepairScreen extends StatelessWidget {
-  const MacImacRepairScreen({Key? key}) : super(key: key);
+class MacImacRepairScreen extends StatefulWidget {
+  const MacImacRepairScreen({super.key});
 
   @override
+  State<MacImacRepairScreen> createState() => _MacImacRepairScreenState();
+}
+
+class _MacImacRepairScreenState extends State<MacImacRepairScreen>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  // Tutorials
+  List<NormalizedTutorial> _tutorials = [];
+  bool _isLoadingTutorials = false;
+  final String youtubeApiKey = 'AIzaSyDHPDJWZqdS8px7AWGW7avsSZU4mHRtz_k';
+
+  // Search
+  final TextEditingController _searchController = TextEditingController();
+
+  // Saved IDs
+  List<String> _savedTutorialIds = [];
+
+  // Shops
+  Position? _currentPosition;
+  bool _loadingShops = false;
+  List<Map<String, dynamic>> _shops = [];
+  Set<Marker> _markers = {};
+  GoogleMapController? _mapController;
+  Set<String> _savedShopIds = {};
+
+  StreamSubscription<DocumentSnapshot>? _savedListener;
+  StreamSubscription<QuerySnapshot>? _savedShopsListener;
+
+  @override
+  void initState() {
+    super.initState();
+    _listenToSavedLists();
+    _prefetchPopularTutorials();
+    _determinePositionAndFetchShops();
+  }
+
+  @override
+  void dispose() {
+    _savedListener?.cancel();
+    _savedShopsListener?.cancel();
+    _mapController?.dispose();
+    super.dispose();
+  }
+
+  // ===================== Firestore Listeners =====================
+  void _listenToSavedLists() {
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    _savedListener =
+        _firestore.collection('users').doc(user.uid).snapshots().listen((snap) {
+          final data = snap.data();
+          if (data != null && data['savedMacTutorials'] != null) {
+            setState(() {
+              _savedTutorialIds = List<String>.from(data['savedMacTutorials']);
+            });
+          }
+        });
+
+    _savedShopsListener = _firestore
+        .collection('users')
+        .doc(user.uid)
+        .collection('saved_mac_shops')
+        .snapshots()
+        .listen((snap) {
+      setState(() {
+        _savedShopIds = snap.docs.map((e) => e.id).toSet();
+      });
+    });
+  }
+
+  // ===================== Log Tutorial to History =====================
+  Future<void> _logTutorialToHistory(NormalizedTutorial tutorial) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    try {
+      await _firestore.collection('history').add({
+        'userId': user.uid,
+        'title': tutorial.title,
+        'subtitle': tutorial.subtitle,
+        'image': tutorial.image,
+        'url': tutorial.url,
+        'type': 'tutorial',
+        'category': 'Mac & iMac Repair',
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      debugPrint('Error logging tutorial history: $e');
+    }
+  }
+
+  // ===================== Tutorials Section =====================
+  Future<void> _prefetchPopularTutorials() async {
+    if (_isLoadingTutorials) return;
+    setState(() => _isLoadingTutorials = true);
+    try {
+      final queries = [
+        'MacBook battery replacement',
+        'iMac screen repair',
+        'Mac keyboard replacement',
+        'MacBook logic board repair'
+      ];
+      List<NormalizedTutorial> results = [];
+      for (var q in queries) {
+        final ifix = await fetchIfixitGuides(q, limit: 5);
+        results.addAll(ifix);
+        final yt = await fetchYoutubeVideos(q, youtubeApiKey, maxResults: 3);
+        results.addAll(yt);
+      }
+      final map = <String, NormalizedTutorial>{};
+      for (var r in results) map[r.id] = r;
+      setState(() => _tutorials = map.values.toList());
+    } catch (e) {
+      debugPrint('Error prefetching tutorials: $e');
+    } finally {
+      setState(() => _isLoadingTutorials = false);
+    }
+  }
+
+  Future<void> _searchTutorials(String query) async {
+    if (query.trim().isEmpty) return;
+    setState(() {
+      _isLoadingTutorials = true;
+      _tutorials = [];
+    });
+    try {
+      final ifix = await fetchIfixitGuides(query, limit: 20);
+      final yt = await fetchYoutubeVideos(query, youtubeApiKey, maxResults: 8);
+      final combined = <String, NormalizedTutorial>{};
+      for (var t in ifix) combined[t.id] = t;
+      for (var t in yt) combined[t.id] = t;
+      setState(() => _tutorials = combined.values.toList());
+    } catch (e) {
+      debugPrint('Search error: $e');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Failed to fetch tutorials')));
+    } finally {
+      setState(() => _isLoadingTutorials = false);
+    }
+  }
+
+  Future<void> _toggleSaveTutorial(NormalizedTutorial tutorial) async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Login required')));
+      return;
+    }
+
+    final userDoc = _firestore.collection('users').doc(user.uid);
+    final safeId = tutorial.id;
+    final historyRef = _firestore.collection('history');
+
+    if (_savedTutorialIds.contains(safeId)) {
+
+      await userDoc.set({
+        'savedMacTutorials': FieldValue.arrayRemove([safeId])
+      }, SetOptions(merge: true));
+
+
+      final q = await historyRef
+          .where('userId', isEqualTo: user.uid)
+          .where('type', isEqualTo: 'tutorial')
+          .where('title', isEqualTo: tutorial.title)
+          .get();
+
+      for (var doc in q.docs) {
+        await doc.reference.update({'isStarred': false});
+      }
+    } else {
+
+      await userDoc.set({
+        'savedMacTutorials': FieldValue.arrayUnion([safeId])
+      }, SetOptions(merge: true));
+
+
+      final q = await historyRef
+          .where('userId', isEqualTo: user.uid)
+          .where('type', isEqualTo: 'tutorial')
+          .where('title', isEqualTo: tutorial.title)
+          .get();
+
+      if (q.docs.isEmpty) {
+        await historyRef.add({
+          'userId': user.uid,
+          'title': tutorial.title,
+          'subtitle': tutorial.subtitle,
+          'image': tutorial.image,
+          'url': tutorial.url,
+          'type': 'tutorial',
+          'category': 'Mac & iMac Repair',
+          'isStarred': true,
+          'timestamp': FieldValue.serverTimestamp(),
+        });
+      } else {
+        await q.docs.first.reference.update({'isStarred': true});
+      }
+    }
+
+
+    setState(() {
+      if (_savedTutorialIds.contains(safeId)) {
+        _savedTutorialIds.remove(safeId);
+      } else {
+        _savedTutorialIds.add(safeId);
+      }
+    });
+  }
+
+
+  // ===================== Nearby Mac Repair Shops =====================
+  Future<void> _determinePositionAndFetchShops() async {
+    setState(() => _loadingShops = true);
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Location services disabled')));
+        setState(() => _loadingShops = false);
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        setState(() => _loadingShops = false);
+        return;
+      }
+
+      final pos =
+      await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      setState(() => _currentPosition = pos);
+
+      await _fetchNearbyMacShops(pos.latitude, pos.longitude);
+    } catch (e) {
+      debugPrint('Error fetching position/shops: $e');
+    } finally {
+      setState(() => _loadingShops = false);
+    }
+  }
+
+  Future<void> _fetchNearbyMacShops(double lat, double lon) async {
+    const int radius = 7000;
+    final query = """
+      [out:json];
+      (
+        node["shop"="computer"](around:$radius,$lat,$lon);
+        node["service"="computer_repair"](around:$radius,$lat,$lon);
+        node["craft"="electronics_repair"]["repair:computer"="yes"](around:$radius,$lat,$lon);
+      );
+      out center;
+    """;
+    final url = "https://overpass-api.de/api/interpreter?data=${Uri.encodeComponent(query)}";
+
+    try {
+      final resp = await http.get(Uri.parse(url));
+      final parsed = jsonDecode(resp.body);
+      final elements = parsed['elements'] as List<dynamic>? ?? [];
+      final shops = <Map<String, dynamic>>[];
+
+      for (var e in elements) {
+        final tags = (e['tags'] ?? {}) as Map<String, dynamic>;
+        final nodeLat = e['lat'] ?? e['center']?['lat'];
+        final nodeLon = e['lon'] ?? e['center']?['lon'];
+        if (nodeLat == null || nodeLon == null) continue;
+
+        final name = tags['name'] ?? 'Mac Repair Shop';
+        final isComputerRepair =
+            (tags['shop'] == 'computer') ||
+                (tags['service'] == 'computer_repair') ||
+                (tags['repair:computer'] == 'yes');
+
+        if (!isComputerRepair) continue;
+
+        final distanceKm =
+            Geolocator.distanceBetween(lat, lon, nodeLat, nodeLon) / 1000.0;
+        final rating = (3 + ((e['id'] ?? 0) % 20) / 10).clamp(2.5, 5.0).toStringAsFixed(1);
+
+        shops.add({
+          'id': e['id'].toString(),
+          'name': name,
+          'lat': nodeLat,
+          'lon': nodeLon,
+          'rating': rating,
+          'distance_km': distanceKm
+        });
+      }
+
+      shops.sort((a, b) =>
+          (a['distance_km'] as double).compareTo(b['distance_km'] as double));
+      setState(() {
+        _shops = shops;
+        _markers = shops
+            .map((s) => Marker(
+          markerId: MarkerId(s['id']),
+          position: LatLng(s['lat'], s['lon']),
+          infoWindow:
+          InfoWindow(title: s['name'], snippet: '${s['rating']} ★'),
+        ))
+            .toSet();
+      });
+    } catch (e) {
+      debugPrint('Error fetching shops: $e');
+    }
+  }
+
+  Future<void> _toggleSaveShop(Map<String, dynamic> shop) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final id = shop['id'].toString();
+    final ref =
+    _firestore.collection('users').doc(user.uid).collection('saved_mac_shops').doc(id);
+    if (_savedShopIds.contains(id)) {
+      await ref.delete();
+    } else {
+      await ref.set({
+        'name': shop['name'],
+        'lat': shop['lat'],
+        'lon': shop['lon'],
+        'rating': shop['rating'],
+        'saved_at': FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  // ===================== UI =====================
+  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("Categories"),
-        centerTitle: true,
-        backgroundColor: Colors.white,
-        elevation: 0,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: () {},
+    super.build(context);
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          backgroundColor: const Color(0xFF10B981),
+          title: const Text('Mac & iMac Repair',
+              style: TextStyle(fontWeight: FontWeight.bold)),
+          bottom: const TabBar(
+            tabs: [
+              Tab(icon: Icon(Icons.menu_book), text: 'Tutorials'),
+              Tab(icon: Icon(Icons.store), text: 'Nearby Shops'),
+            ],
           ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        ),
+        body: TabBarView(
           children: [
-            // ✅ Top Section with Row (icon left | text right)
-            Container(
-              padding: const EdgeInsets.all(16),
-              color: const Color(0xFF10B981),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Icon(Icons.phone_android,
-                          color: Colors.white, size: 40),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: const [
-                            Text(
-                              "Mac Repair",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            SizedBox(height: 6),
-                            Text(
-                              "Repair guides and disassembly information for Apple's Macintosh personal computers.",
-                              style: TextStyle(
-                                  color: Colors.white70, fontSize: 14),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text("50+ Guides", style: TextStyle(color: Colors.white)),
-                      Text("10k+ Repairs", style: TextStyle(color: Colors.white)),
-                      Text("95% Success", style: TextStyle(color: Colors.white)),
-                    ],
-                  )
-                ],
-              ),
-            ),
-
-            // ✅ Quick Access Section
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black12,
-                      blurRadius: 6,
-                      offset: Offset(0, 2),
-                    )
-                  ],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      "Quick Access",
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        quickAccessButton(Icons.search, "Search Guides",
-                            backgroundColor: Colors.blue.shade50,
-                            iconColor: Colors.blue),
-                        quickAccessButton(Icons.bookmark, "Saved",
-                            backgroundColor: Colors.green.shade50,
-                            iconColor: Colors.green),
-                        quickAccessButton(Icons.history, "Recent",
-                            backgroundColor: Colors.purple.shade50,
-                            iconColor: Colors.purple),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            // ✅ Categories Title
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Text(
-                "3 Categories",
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-
-            // ✅ Categories Grid
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: GridView.count(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                crossAxisCount: 2,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 1.0,
-                children: [
-                  categoryCard("images/mac/mac1.png", "Mac Laptop"),
-                  categoryCard("images/mac/mac2.png", "Mac Desktop"),
-                  categoryCard("images/mac/mac3.png", "Mac Hardware\nAccessories"),
-                ],
-              ),
-            ),
-
-// ⬇️ Add spacing here
-            const SizedBox(height: 24),
-
-// ✅ Featured Tutorials Section
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    "Featured Tutorials",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade100,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Text(
-                      "Hot",
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.orange,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            // ✅ Vertical List of Tutorials
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(
-                children: [
-                  tutorialCardVertical(
-                    title: "MacBook Battery Replacement",
-                    description: "Step-by-step battery swap guide",
-                    imagePath: "images/mac/f1.png",
-                    time: "45 min",
-                    difficulty: "Beginner",
-                    difficultyColor: Colors.green,
-                  ),
-                  const SizedBox(height: 12),
-                  tutorialCardVertical(
-                    title: "MacBook Screen Replacement",
-                    description: "Fix cracked or damaged displays",
-                    imagePath: "images/mac/f2.png",
-                    time: "90 min",
-                    difficulty: "Advanced",
-                    difficultyColor: Colors.orange.shade200,
-                  ),
-                  const SizedBox(height: 12),
-                  tutorialCardVertical(
-                    title: "iMac SSD Upgrade",
-                    description: "Boost performance with SSD",
-                    imagePath: "images/mac/f2.png",
-                    time: "90 min",
-                    difficulty: "Intermediate",
-                    difficultyColor: Colors.yellow.shade200,
-                  ),
-                ],
-              ),
-            ),
-            // ✅ Replacement Guides Section
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 20),
-                  const Text(
-                    "Replacement Guides",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 12),
-
-                  replacementGuideCard(
-                    title: "SSD External Setup",
-                    description: "Install SSD in enclosure",
-                    imagePath: "images/mac/rg1.png",
-                  ),
-                  replacementGuideCard(
-                    title: "Internet Recovery",
-                    description: "Boot from internet",
-                    imagePath: "images/mac/rg2.png",
-                  ),
-                  replacementGuideCard(
-                    title: "Drive Cloning",
-                    description: "Clone HDD/SSD safely",
-                    imagePath: "images/mac/rg3.png",
-                  ),
-                  replacementGuideCard(
-                    title: "APFS Conversion",
-                    description: "Convert file system",
-                    imagePath: "images/mac/rg4.png",
-                  ),
-                  replacementGuideCard(
-                    title: "Time Machine Setup",
-                    description: "Automatic backups",
-                    imagePath: "images/mac/rg5.png",
-                  ),
-                  replacementGuideCard(
-                    title: "Data Migration",
-                    description: "Transfer to new drive",
-                    imagePath: "images/mac/rg6.png",
-                  ),
-                ],
-              ),
-            ),
-            // ✅ Maintenance & Fixes Section
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 20),
-                  const Text(
-                    "Maintenance & Fixes",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 12),
-
-                  maintenanceCard(
-                    title: "Clean MacBook Screen & Keyboard",
-                    description: "Proper cleaning techniques",
-                    tag: "Featured",
-                    tagColor: Colors.blue.shade100,
-                    tagTextColor: Colors.blue,
-                    time: "10 min",
-                    buttonText: "View Tutorial",
-                  ),
-                  maintenanceCard(
-                    title: "Manage Startup Apps",
-                    description: "Control login items",
-                    tag: "Medium",
-                    tagColor: Colors.yellow.shade100,
-                    tagTextColor: Colors.orange,
-                    time: "15 min",
-                    buttonText: "View Tutorial",
-                  ),
-                  maintenanceCard(
-                    title: "Monitor Performance",
-                    description: "Use Activity Monitor",
-                    tag: "Hard",
-                    tagColor: Colors.red.shade100,
-                    tagTextColor: Colors.red,
-                    time: "30 min",
-                    buttonText: "View Tutorial",
-                  ),
-                ],
-              ),
-            ),
+            _buildTutorialsTab(),
+            _buildShopsTab(),
           ],
         ),
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        type: BottomNavigationBarType.fixed,
-        currentIndex: 1,
-        selectedItemColor: Colors.green,
-        onTap: (index) {
-          if (index == 0) {
-            Navigator.pop(context);
-          }
-        },
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: "Home"),
-          BottomNavigationBarItem(icon: Icon(Icons.menu_book), label: "Tutorials"),
-          BottomNavigationBarItem(icon: Icon(Icons.store), label: "Shops"),
-          BottomNavigationBarItem(icon: Icon(Icons.history), label: "History"),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: "Profile"),
-        ],
-      ),
     );
   }
 
-  // ✅ Reusable Quick Access Button
-  Widget quickAccessButton(IconData icon, String label,
-      {Color backgroundColor = Colors.grey, Color iconColor = Colors.black}) {
+  Widget _buildTutorialsTab() {
     return Column(
       children: [
-        CircleAvatar(
-          radius: 24,
-          backgroundColor: backgroundColor,
-          child: Icon(icon, color: iconColor, size: 22),
-        ),
-        const SizedBox(height: 6),
-        Text(label, style: const TextStyle(fontSize: 12)),
-      ],
-    );
-  }
-
-  // ✅ Reusable Category Card
-  Widget categoryCard(String imagePath, String title) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Image.asset(
-            imagePath,
-            height: 80,
-            fit: BoxFit.contain,
-          ),
-          const SizedBox(height: 10),
-          Text(
-            title,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-Widget tutorialCardVertical({
-  required String title,
-  required String description,
-  required String imagePath,
-  required String time,
-  required String difficulty,
-  required Color difficultyColor,
-}) {
-  return Container(
-    margin: const EdgeInsets.only(bottom: 10),
-    padding: const EdgeInsets.all(12),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(12),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black12,
-          blurRadius: 4,
-          offset: const Offset(0, 2),
-        ),
-      ],
-    ),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.asset(
-            imagePath,
-            width: 70,
-            height: 70,
-            fit: BoxFit.cover,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: TextField(
+            controller: _searchController,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (v) => _searchTutorials(v),
+            decoration: InputDecoration(
+              hintText: 'Search Mac or iMac tutorials (battery, screen, etc.)',
+              filled: true,
+              fillColor: Colors.grey[100],
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.clear),
+                onPressed: () {
+                  _searchController.clear();
+                  _prefetchPopularTutorials();
+                },
               ),
-              const SizedBox(height: 4),
-              Text(
-                description,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: Colors.grey.shade600,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  const Icon(Icons.access_time, size: 14, color: Colors.grey),
-                  const SizedBox(width: 4),
-                  Text(
-                    time,
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
-                  ),
-                  const SizedBox(width: 12),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: difficultyColor.withOpacity(0.15),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      difficulty,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: difficultyColor,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-Widget replacementGuideCard({
-  required String title,
-  required String description,
-  required String imagePath,
-}) {
-  return Container(
-    margin: const EdgeInsets.only(bottom: 12),
-    padding: const EdgeInsets.all(12),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(12),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black12,
-          blurRadius: 4,
-          offset: const Offset(0, 2),
-        ),
-      ],
-    ),
-    child: Row(
-      children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.asset(
-            imagePath,
-            width: 55,
-            height: 55,
-            fit: BoxFit.cover,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                description,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: Colors.grey.shade600,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const Icon(Icons.chevron_right, color: Colors.grey),
-      ],
-    ),
-  );
-}
-
-Widget maintenanceCard({
-  required String title,
-  required String description,
-  required String tag,
-  required Color tagColor,
-  required Color tagTextColor,
-  required String time,
-  required String buttonText,
-}) {
-  return Container(
-    margin: const EdgeInsets.only(bottom: 12),
-    padding: const EdgeInsets.all(16),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(12),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black12,
-          blurRadius: 4,
-          offset: const Offset(0, 2),
-        ),
-      ],
-    ),
-    child: Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        // Left side (text + tags)
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                description,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: Colors.grey.shade600,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: tagColor,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(
-                      tag,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        color: tagTextColor,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Row(
-                    children: [
-                      const Icon(Icons.access_time, size: 14, color: Colors.grey),
-                      const SizedBox(width: 4),
-                      Text(
-                        time,
-                        style: const TextStyle(fontSize: 12, color: Colors.grey),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: 12),
-        // Right side button
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.green,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
+              border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none),
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           ),
-          onPressed: () {},
-          child: Text(
-            buttonText,
-            style: const TextStyle(fontSize: 13, color: Colors.white),
+        ),
+        Expanded(
+          child: _isLoadingTutorials
+              ? const Center(child: CircularProgressIndicator())
+              : _tutorials.isEmpty
+              ? const Center(child: Text('No tutorials found.'))
+              : ListView.builder(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 80),
+            itemCount: _tutorials.length,
+            itemBuilder: (context, i) {
+              final t = _tutorials[i];
+              final saved = _savedTutorialIds.contains(t.id);
+              return Card(
+                margin: const EdgeInsets.only(bottom: 12),
+                elevation: 3,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+                child: ListTile(
+                  leading: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      t.image,
+                      width: 70,
+                      height: 70,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Container(
+                          width: 70,
+                          height: 70,
+                          color: Colors.grey[200]),
+                    ),
+                  ),
+                  title: Text(t.title,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                    t.subtitle,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: IconButton(
+                    icon: Icon(
+                        saved
+                            ? Icons.star
+                            : Icons.star_border_outlined,
+                        color: Colors.amber),
+                    onPressed: () => _toggleSaveTutorial(t),
+                  ),
+                  onTap: () async {
+                    await _logTutorialToHistory(t);
+                    final uri = Uri.parse(t.url);
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri,
+                          mode: LaunchMode.externalApplication);
+                    }
+                  },
+                ),
+              );
+            },
           ),
         ),
       ],
-    ),
-  );
+    );
+  }
+
+  Widget _buildShopsTab() {
+    return _loadingShops
+        ? const Center(child: CircularProgressIndicator())
+        : _currentPosition == null
+        ? const Center(
+        child: Text('Enable location to find nearby shops'))
+        : Stack(
+      children: [
+        GoogleMap(
+          initialCameraPosition: CameraPosition(
+            target: LatLng(_currentPosition!.latitude,
+                _currentPosition!.longitude),
+            zoom: 14,
+          ),
+          myLocationEnabled: true,
+          myLocationButtonEnabled: true,
+          markers: _markers,
+          onMapCreated: (c) => _mapController = c,
+          gestureRecognizers: {
+            Factory<OneSequenceGestureRecognizer>(
+                    () => VerticalDragGestureRecognizer()),
+          },
+        ),
+        DraggableScrollableSheet(
+          initialChildSize: 0.25,
+          maxChildSize: 0.65,
+          minChildSize: 0.20,
+          builder: (context, sc) {
+            return Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius:
+                BorderRadius.vertical(top: Radius.circular(16)),
+                boxShadow: [
+                  BoxShadow(color: Colors.black26, blurRadius: 8)
+                ],
+              ),
+              child: Column(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 5,
+                    margin:
+                    const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView.builder(
+                      controller: sc,
+                      padding: const EdgeInsets.only(
+                          top: 0, bottom: 80),
+                      itemCount: _shops.length,
+                      itemBuilder: (context, i) {
+                        final s = _shops[i];
+                        final saved = _savedShopIds
+                            .contains(s['id'].toString());
+                        return ListTile(
+                          leading: const Icon(Icons.computer,
+                              color: Color(0xFF10B981)),
+                          title: Text(s['name']),
+                          subtitle: Text(
+                              '${s['distance_km'].toStringAsFixed(2)} km • ${s['rating']} ★'),
+                          trailing: IconButton(
+                            icon: Icon(
+                                saved
+                                    ? Icons.star
+                                    : Icons
+                                    .star_border_outlined,
+                                color: saved
+                                    ? Colors.amber
+                                    : Colors.grey),
+                            onPressed: () =>
+                                _toggleSaveShop(s),
+                          ),
+                          onTap: () {
+                            _mapController?.animateCamera(
+                              CameraUpdate.newLatLngZoom(
+                                  LatLng(s['lat'], s['lon']),
+                                  17),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
 }

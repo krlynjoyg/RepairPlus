@@ -162,7 +162,7 @@ class _TermsConditionsScreenState extends State<TermsConditionsScreen> {
   }
 }
 
-/// Section with a green title and child widgets
+
 class Section extends StatelessWidget {
   final String title;
   final List<Widget> children;
@@ -195,7 +195,7 @@ class Section extends StatelessWidget {
   }
 }
 
-/// Paragraph widget
+
 class Paragraph extends StatelessWidget {
   final String text;
   const Paragraph(this.text, {super.key});
@@ -209,7 +209,7 @@ class Paragraph extends StatelessWidget {
   }
 }
 
-/// Bullet point widget
+
 class Bullet extends StatelessWidget {
   final String text;
   const Bullet(this.text, {super.key});

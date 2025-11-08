@@ -1,8 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+// Screens
 import 'home_screen.dart';
 import 'tutorial_screen.dart';
 import 'repair_shops_screen.dart';
 import 'history_screen.dart';
+import 'login_screen.dart';
+import 'edit_profile_screen.dart';
+import 'saved_shops_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -12,41 +20,158 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  int _selectedIndex = 4; // Profile tab active
+  int _selectedIndex = 4;
+  User? _user;
+  bool _locationEnabled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _user = FirebaseAuth.instance.currentUser;
+    _loadLocationPreference();
+
+    FirebaseAuth.instance.authStateChanges().listen((u) {
+      if (mounted) setState(() => _user = u);
+    });
+  }
+
+  Future<void> _loadLocationPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _locationEnabled = prefs.getBool('location_enabled') ?? false;
+    });
+  }
+
+  Future<void> _toggleLocation(bool value) async {
+    if (value) {
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        final request = await Geolocator.requestPermission();
+        if (request == LocationPermission.denied) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Location permission denied.")),
+          );
+          return;
+        }
+      }
+      if (permission == LocationPermission.deniedForever) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Location permanently denied. Enable it in settings.")),
+        );
+        return;
+      }
+
+      final isLocationEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!isLocationEnabled) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Please enable location services.")),
+        );
+        return;
+      }
+
+      final position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      debugPrint("User location: ${position.latitude}, ${position.longitude}");
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('location_enabled', value);
+    setState(() => _locationEnabled = value);
+  }
 
   void _onItemTapped(int index) {
     if (index == _selectedIndex) return;
 
-    if (index == 0) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const HomeScreen()),
-      );
-    } else if (index == 1) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const TutorialScreen()),
-      );
-    } else if (index == 2) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const RepairShopsScreen()),
-      );
-    } else if (index == 3) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const HistoryScreen()),
-      );
-    } else if (index == 4) {
-      // already in Profile
+    Widget screen;
+    switch (index) {
+      case 0:
+        screen = const HomeScreen();
+        break;
+      case 1:
+        screen = const TutorialScreen();
+        break;
+      case 2:
+        screen = const RepairShopsScreen();
+        break;
+      case 3:
+        screen = const HistoryScreen();
+        break;
+      default:
+        return;
     }
-    setState(() {
-      _selectedIndex = index;
-    });
+
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => screen));
+    setState(() => _selectedIndex = index);
+  }
+
+  Future<void> _changePasswordDialog() async {
+    final controller = TextEditingController();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Change Password"),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          decoration: const InputDecoration(labelText: "Enter new password"),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text("Save")),
+        ],
+      ),
+    );
+
+    if (confirm == true && controller.text.isNotEmpty) {
+      try {
+        await _user?.updatePassword(controller.text);
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text("Password updated successfully.")));
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text("Error: ${e.toString()}")));
+        }
+      }
+    }
+  }
+
+  Future<void> _confirmLogout() async {
+    final shouldLogout = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Confirm Logout"),
+        content: const Text("Are you sure you want to log out?"),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("Logout"),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldLogout == true) {
+      await FirebaseAuth.instance.signOut();
+      if (mounted) {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+              (route) => false,
+        );
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final displayName = _user?.displayName ?? 'No Name';
+    final email = _user?.email ?? '';
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
@@ -55,109 +180,75 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Profile Header
               Row(
                 children: [
-                  const CircleAvatar(
+                  CircleAvatar(
                     radius: 35,
-                    backgroundImage: AssetImage("images/dash/dash2.png"),
+                    backgroundImage: _user?.photoURL != null
+                        ? NetworkImage(_user!.photoURL!)
+                        : const AssetImage("images/dash/dash2.png") as ImageProvider,
                   ),
                   const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
-                      children: const [
-                        Text(
-                          "Sarah Johnson",
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        SizedBox(height: 4),
-                        Text(
-                          "sarah.j@email.com",
-                          style: TextStyle(color: Colors.grey),
-                        ),
+                      children: [
+                        Text(displayName,
+                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text(email, style: const TextStyle(color: Colors.grey)),
                       ],
                     ),
                   ),
                   ElevatedButton.icon(
-                    onPressed: () {},
+                    onPressed: () {
+                      Navigator.push(context,
+                          MaterialPageRoute(builder: (_) => const EditProfileScreen()))
+                          .then((_) => setState(() => _user = FirebaseAuth.instance.currentUser));
+                    },
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
+                        backgroundColor: Colors.green,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
                     icon: const Icon(Icons.edit, size: 16, color: Colors.white),
                     label: const Text("Edit", style: TextStyle(color: Colors.white)),
                   ),
                 ],
               ),
-              const SizedBox(height: 20),
-
-              // Stats Row
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  statCard("Tutorials", "24", Icons.menu_book),
-                  statCard("Shops", "12", Icons.store),
-                  statCard("Recycled", "8", Icons.recycling),
-                  statCard("Reviews", "16", Icons.reviews),
-                ],
-              ),
 
               const SizedBox(height: 30),
-
-              // Sections
               buildSectionTitle("Account Settings"),
-              buildListTile(Icons.person, "Edit Profile"),
-              buildListTile(Icons.lock, "Change Password"),
-              buildListTile(Icons.devices, "Connected Devices"),
-              buildListTile(Icons.palette, "Theme Preferences"),
+              buildListTile(Icons.person, "Edit Profile", () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const EditProfileScreen()))
+                    .then((_) => setState(() => _user = FirebaseAuth.instance.currentUser));
+              }),
+              buildListTile(Icons.lock, "Change Password", _changePasswordDialog),
 
               const SizedBox(height: 20),
-
-              buildSectionTitle("Favorites & History"),
-              buildListTile(Icons.favorite, "Saved Shops"),
-              buildListTile(Icons.history, "History"),
-
-              const SizedBox(height: 20),
-
-              buildSectionTitle("Preferences"),
-              buildListTile(Icons.notifications, "Notifications"),
-              buildListTile(Icons.language, "Language & Region"),
+              buildSectionTitle("Location Services"),
               SwitchListTile(
-                value: true,
-                onChanged: (val) {},
-                title: const Text("Location Services"),
+                value: _locationEnabled,
+                onChanged: _toggleLocation,
+                title: const Text("Enable Location Service"),
                 secondary: const Icon(Icons.location_on, color: Colors.green),
               ),
 
               const SizedBox(height: 20),
-
-              buildSectionTitle("Support & Info"),
-              buildListTile(Icons.support_agent, "Contact Support"),
-              buildListTile(Icons.help_outline, "FAQs & Help"),
-              buildListTile(Icons.privacy_tip, "Terms & Privacy"),
+              buildSectionTitle("Favorites & History"),
+              buildListTile(Icons.favorite, "Saved Shops", () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const SavedShopsScreen()));
+              }),
+              buildListTile(Icons.history, "History", () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const HistoryScreen()));
+              }),
 
               const SizedBox(height: 30),
-
-              // Logout Button
               Center(
                 child: ElevatedButton.icon(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Logged out")),
-                    );
-                  },
+                  onPressed: _confirmLogout,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.red,
                     minimumSize: const Size(double.infinity, 50),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                   icon: const Icon(Icons.logout, color: Colors.white),
                   label: const Text("Logout", style: TextStyle(color: Colors.white)),
@@ -184,51 +275,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  // Helper Widgets
-  Widget statCard(String title, String value, IconData icon) {
-    return Expanded(
-      child: Card(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            children: [
-              Icon(icon, color: Colors.green, size: 28),
-              const SizedBox(height: 6),
-              Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              const SizedBox(height: 2),
-              Text(title, style: const TextStyle(fontSize: 12, color: Colors.black54)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  Widget buildSectionTitle(String title) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 8),
+    child: Text(
+      title,
+      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.black87),
+    ),
+  );
 
-  Widget buildSectionTitle(String title) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Text(
-        title,
-        style: const TextStyle(
-          fontWeight: FontWeight.bold,
-          fontSize: 16,
-          color: Colors.black87,
-        ),
-      ),
-    );
-  }
-
-  Widget buildListTile(IconData icon, String title) {
+  Widget buildListTile(IconData icon, String title, VoidCallback onTap) {
     return ListTile(
       leading: Icon(icon, color: Colors.green),
       title: Text(title),
       trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-      onTap: () {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("$title tapped")),
-        );
-      },
+      onTap: onTap,
     );
   }
 }

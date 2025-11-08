@@ -1,12 +1,12 @@
+import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
-import 'package:repair_plus_one/profile_screen.dart';
-import 'home_screen.dart';
-import 'tutorial_screen.dart';
-import 'history_screen.dart';
-import 'profile_screen.dart';
-import 'find_guide_screen.dart'; // ✅ Added import
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'saved_shops_screen.dart';
 
 class RepairShopsScreen extends StatefulWidget {
   const RepairShopsScreen({super.key});
@@ -15,429 +15,451 @@ class RepairShopsScreen extends StatefulWidget {
   State<RepairShopsScreen> createState() => _RepairShopsScreenState();
 }
 
-class _RepairShopsScreenState extends State<RepairShopsScreen> {
-  int _selectedIndex = 2; // Shops tab active by default
+class _RepairShopsScreenState extends State<RepairShopsScreen>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
 
-  // ---------------- Filter States ----------------
-  String _selectedCategory = "All";
-  bool _onlyOpen = false;
-  String _sortBy = "Distance";
-  String _searchQuery = "";
+  GoogleMapController? _mapController;
+  Position? _currentLocation;
+  List<dynamic> _allShops = [];
+  List<dynamic> _nearbyShops = [];
+  Set<Marker> _markers = {};
+  bool _showOpenNow = false;
+  double _maxDistanceKm = 5.0;
+  bool _isLoading = false;
 
-  // ---------------- Example shops list with coords ----------------
-  final List<Map<String, dynamic>> allShops = [
-    {
-      "name": "Maewa Repair Shop",
-      "type": "Phone Repair",
-      "distance": "1.2 km away",
-      "rating": 4.5,
-      "isOpen": true,
-      "imagePath": "images/phones/phone1.png",
-      "coords": LatLng(7.1907, 125.4553),
-    },
-    {
-      "name": "TechFix Electronics",
-      "type": "Laptop Repair • Gaming",
-      "distance": "2.1 km away",
-      "rating": 4.8,
-      "isOpen": false,
-      "imagePath": "images/laptop/laptop1.png",
-      "coords": LatLng(7.2000, 125.4600),
-    },
-    {
-      "name": "Gadgeteria Gadget Repair Shop",
-      "type": "Phone Repair",
-      "distance": "3.5 km away",
-      "rating": 4.6,
-      "isOpen": true,
-      "imagePath": "images/phones/phone2.png",
-      "coords": LatLng(7.1950, 125.4700),
-    },
-    {
-      "name": "IO Microsystems Computer Repair",
-      "type": "Computer Repair",
-      "distance": "5.2 km away",
-      "rating": 4.2,
-      "isOpen": true,
-      "imagePath": "images/laptop/laptop2.png",
-      "coords": LatLng(7.1850, 125.4500),
-    },
-  ];
+  final User? _user = FirebaseAuth.instance.currentUser;
+  Set<String> _savedShopIds = {};
+  StreamSubscription<QuerySnapshot>? _savedShopsListener;
 
-  // ---------------- Filtering ----------------
-  List<Map<String, dynamic>> get filteredShops {
-    List<Map<String, dynamic>> shops = List.from(allShops);
-
-    if (_searchQuery.isNotEmpty) {
-      shops = shops
-          .where((shop) => shop["name"]
-          .toString()
-          .toLowerCase()
-          .contains(_searchQuery.toLowerCase()))
-          .toList();
-    }
-
-    if (_selectedCategory != "All") {
-      shops = shops
-          .where((shop) => shop["type"].toString().contains(_selectedCategory))
-          .toList();
-    }
-
-    if (_onlyOpen) {
-      shops = shops.where((shop) => shop["isOpen"] == true).toList();
-    }
-
-    if (_sortBy == "Rating") {
-      shops.sort(
-              (a, b) => (b["rating"] as double).compareTo(a["rating"] as double));
-    }
-
-    return shops;
+  @override
+  void initState() {
+    super.initState();
+    _initializeData();
   }
 
-  // ---------------- Bottom Nav ----------------
-  void _onItemTapped(int index) {
-    if (index == 0) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const HomeScreen()),
-      );
-    } else if (index == 1) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const TutorialScreen()),
-      );
-    } else if (index == 2) {
-      // already in Shops
-    } else if (index == 3) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const HistoryScreen()),
-      );
-    } else if (index == 4) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const ProfileScreen()),
-      );
-    }
+  @override
+  void dispose() {
+    _savedShopsListener?.cancel();
+    super.dispose();
+  }
 
-    setState(() {
-      _selectedIndex = index;
+  Future<void> _initializeData() async {
+    if (_user != null) _listenToSavedShops();
+    if (_allShops.isEmpty || _currentLocation == null) {
+      await _getCurrentLocation();
+    } else {
+      _updateMarkers();
+    }
+  }
+
+  void _listenToSavedShops() {
+    _savedShopsListener = FirebaseFirestore.instance
+        .collection('users')
+        .doc(_user!.uid)
+        .collection('saved_shops')
+        .snapshots()
+        .listen((snapshot) {
+      setState(() {
+        _savedShopIds = snapshot.docs.map((e) => e.id).toSet();
+      });
     });
   }
 
-  // ---------------- Filter Bottom Sheet ----------------
-  void _showFilterSheet() {
+  Future<void> _getCurrentLocation() async {
+    setState(() => _isLoading = true);
+
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      setState(() => _isLoading = false);
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        setState(() => _isLoading = false);
+        return;
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      setState(() => _isLoading = false);
+      return;
+    }
+
+    final pos = await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
+    );
+
+    setState(() => _currentLocation = pos);
+
+    await _fetchNearbyRepairShops(pos.latitude, pos.longitude);
+    setState(() => _isLoading = false);
+  }
+
+  Future<void> _fetchNearbyRepairShops(double lat, double lon) async {
+    const radiusMeters = 5000;
+
+
+    final query = """
+    [out:json];
+    (
+      node["shop"="repair"](around:$radiusMeters,$lat,$lon);
+      node["shop"="electronics"](around:$radiusMeters,$lat,$lon);
+      node["shop"="mobile_phone"](around:$radiusMeters,$lat,$lon);
+      node["shop"="computer"](around:$radiusMeters,$lat,$lon);
+      node["shop"="it"](around:$radiusMeters,$lat,$lon);
+      node["craft"="electronics_repair"](around:$radiusMeters,$lat,$lon);
+      node["craft"="computer_repair"](around:$radiusMeters,$lat,$lon);
+      node["service"="electronics_repair"](around:$radiusMeters,$lat,$lon);
+      node["service"="mobile_phone_repair"](around:$radiusMeters,$lat,$lon);
+      node["service"="computer_repair"](around:$radiusMeters,$lat,$lon);
+      // ✅ Additional repair-related categories
+      node["shop"="car_repair"](around:$radiusMeters,$lat,$lon);
+      node["shop"="bicycle"](around:$radiusMeters,$lat,$lon);
+      node["service"="repair"](around:$radiusMeters,$lat,$lon);
+    );
+    out;
+    """;
+
+    final url =
+        "https://overpass-api.de/api/interpreter?data=${Uri.encodeComponent(query)}";
+
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          _allShops = data["elements"];
+          _nearbyShops = List.from(_allShops);
+        });
+        _applyFilters();
+      } else {
+        debugPrint("Overpass API returned status: ${response.statusCode}");
+      }
+    } catch (e) {
+      debugPrint("Error fetching shops: $e");
+    }
+  }
+
+  void _applyFilters() {
+    if (_currentLocation == null) return;
+
+    final filtered = _allShops.where((shop) {
+      final lat = shop['lat'];
+      final lon = shop['lon'];
+      if (lat == null || lon == null) return false;
+
+      final distanceKm = Geolocator.distanceBetween(
+        _currentLocation!.latitude,
+        _currentLocation!.longitude,
+        lat,
+        lon,
+      ) / 1000;
+
+      if (distanceKm > _maxDistanceKm) return false;
+
+      if (_showOpenNow) {
+        final tags = shop['tags'] ?? {};
+        final hours = tags['opening_hours'];
+        if (hours == null) return false;
+
+        final h = hours.toString().toLowerCase();
+        if (!(h.contains("24/7") || h.contains("mo") || h.contains("su"))) {
+          return false;
+        }
+      }
+
+      return true;
+    }).toList();
+
+    setState(() {
+      _nearbyShops = filtered;
+    });
+
+    _updateMarkers();
+  }
+
+  void _updateMarkers() {
+    final markers = <Marker>{};
+
+    for (final shop in _nearbyShops) {
+      final lat = shop['lat'];
+      final lon = shop['lon'];
+      if (lat == null || lon == null) continue;
+
+      final name = shop['tags']?['name'] ?? 'Unnamed Repair Shop';
+      final type = shop['tags']?['shop'] ??
+          shop['tags']?['craft'] ??
+          shop['tags']?['service'] ??
+          'Repair Service';
+
+      markers.add(Marker(
+        markerId: MarkerId(shop['id'].toString()),
+        position: LatLng(lat, lon),
+        infoWindow: InfoWindow(title: name, snippet: type),
+      ));
+    }
+
+    setState(() => _markers = markers);
+  }
+
+  Future<void> _toggleSaveShop(dynamic shop) async {
+    if (_user == null) return;
+    final id = shop['id'].toString();
+
+    final ref = FirebaseFirestore.instance
+        .collection('users')
+        .doc(_user!.uid)
+        .collection('saved_shops')
+        .doc(id);
+
+    if (_savedShopIds.contains(id)) {
+      await ref.delete();
+    } else {
+      final tags = shop['tags'] ?? {};
+      await ref.set({
+        'name': tags['name'] ?? 'Unnamed Repair Shop',
+        'type': tags['shop'] ??
+            tags['craft'] ??
+            tags['service'] ??
+            'Repair Service',
+        'lat': shop['lat'],
+        'lon': shop['lon'],
+        'address': tags['addr:street'] ?? '',
+        'saved_at': FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  void _showFilterDialog() {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text("Filter Shops",
-                      style:
-                      TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 16),
-
-                  DropdownButtonFormField<String>(
-                    value: _selectedCategory,
-                    items: ["All", "Phone", "Laptop", "Computer"]
-                        .map((c) =>
-                        DropdownMenuItem(value: c, child: Text(c)))
-                        .toList(),
-                    onChanged: (val) {
-                      setModalState(() {
-                        _selectedCategory = val!;
-                      });
-                    },
-                    decoration: const InputDecoration(
-                      labelText: "Category",
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  SwitchListTile(
-                    title: const Text("Open now only"),
-                    value: _onlyOpen,
-                    onChanged: (val) {
-                      setModalState(() {
-                        _onlyOpen = val;
-                      });
-                    },
-                  ),
-                  const SizedBox(height: 16),
-
-                  DropdownButtonFormField<String>(
-                    value: _sortBy,
-                    items: ["Distance", "Rating"]
-                        .map((s) =>
-                        DropdownMenuItem(value: s, child: Text(s)))
-                        .toList(),
-                    onChanged: (val) {
-                      setModalState(() {
-                        _sortBy = val!;
-                      });
-                    },
-                    decoration: const InputDecoration(
-                      labelText: "Sort By",
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-
-                  ElevatedButton(
-                    onPressed: () {
-                      setState(() {});
-                      Navigator.pop(context);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 45),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            child: StatefulBuilder(
+              builder: (context, setModalState) {
+                return SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        "Filter Repair Shops",
+                        style:
+                        TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                       ),
-                    ),
-                    child: const Text("Apply Filters"),
+                      const SizedBox(height: 10),
+                      SwitchListTile(
+                        title: const Text("Open Now"),
+                        value: _showOpenNow,
+                        onChanged: (v) =>
+                            setModalState(() => _showOpenNow = v),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                          "Max Distance: ${_maxDistanceKm.toStringAsFixed(1)} km"),
+                      Slider(
+                        value: _maxDistanceKm,
+                        min: 1,
+                        max: 20,
+                        divisions: 19,
+                        onChanged: (v) =>
+                            setModalState(() => _maxDistanceKm = v),
+                      ),
+                      const SizedBox(height: 20),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF10B981),
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 16, horizontal: 24),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                        onPressed: () {
+                          Navigator.pop(context);
+                          _applyFilters();
+                        },
+                        child: const Text(
+                          "Apply Filters",
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
                   ),
-                ],
-              ),
-            );
-          },
+                );
+              },
+            ),
+          ),
         );
       },
     );
   }
 
-  // ---------------- UI ----------------
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("RePair+ Shops"),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const FindGuideScreen()), // ✅ Navigate to FindGuideScreen
-              );
-            },
-            icon: const Icon(Icons.search),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Map Section
-          SizedBox(
-            height: 250,
-            child: FlutterMap(
-              options: const MapOptions(
-                initialCenter: LatLng(7.1907, 125.4553),
-                initialZoom: 13,
-              ),
-              children: [
-                TileLayer(
-                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  userAgentPackageName: 'com.example.repair_plus_one',
-                ),
-                MarkerLayer(
-                  markers: allShops.map((shop) {
-                    final coords = shop["coords"] as LatLng;
-                    return Marker(
-                      point: coords,
-                      width: 40,
-                      height: 40,
-                      child: const Icon(Icons.location_pin,
-                          color: Colors.red, size: 35),
-                    );
-                  }).toList(),
-                ),
-              ],
-            ),
-          ),
+  Widget _buildShopCard(dynamic shop) {
+    final id = shop['id'].toString();
+    final name = shop['tags']?['name'] ?? 'Unnamed Repair Shop';
+    final type = shop['tags']?['shop'] ??
+        shop['tags']?['craft'] ??
+        shop['tags']?['service'] ??
+        'Repair Service';
+    final address = shop['tags']?['addr:street'] ?? 'No address available';
+    final isSaved = _savedShopIds.contains(id);
 
-          // Search Bar
-          Padding(
-            padding: const EdgeInsets.all(10.0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    onChanged: (val) {
-                      setState(() {
-                        _searchQuery = val;
-                      });
-                    },
-                    decoration: InputDecoration(
-                      prefixIcon: const Icon(Icons.search),
-                      hintText: "Search a shop...",
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton(
-                  onPressed: _showFilterSheet,
-                  icon: const Icon(Icons.filter_list),
-                )
-              ],
-            ),
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      elevation: 2,
+      child: ListTile(
+        leading: const Icon(Icons.build, color: Color(0xFF10B981)),
+        title: Text(
+          name,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        ),
+        subtitle: Text("$type\n$address"),
+        isThreeLine: true,
+        trailing: IconButton(
+          icon: Icon(
+            isSaved ? Icons.star : Icons.star_border,
+            color: isSaved ? Colors.amber : Colors.grey,
           ),
-
-          // Shop List
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(8),
-              children: filteredShops.map((shop) {
-                return ShopCard(
-                  name: shop["name"],
-                  type: shop["type"],
-                  distance: shop["distance"],
-                  rating: shop["rating"],
-                  isOpen: shop["isOpen"],
-                  imagePath: shop["imagePath"],
-                );
-              }).toList(),
-            ),
-          ),
-        ],
-      ),
-      bottomNavigationBar: BottomNavigationBar(
-        type: BottomNavigationBarType.fixed,
-        currentIndex: _selectedIndex,
-        selectedItemColor: Colors.green,
-        unselectedItemColor: Colors.grey,
-        onTap: _onItemTapped,
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: "Home"),
-          BottomNavigationBarItem(icon: Icon(Icons.menu_book), label: "Tutorials"),
-          BottomNavigationBarItem(icon: Icon(Icons.store), label: "Shops"),
-          BottomNavigationBarItem(icon: Icon(Icons.history), label: "History"),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: "Profile"),
-        ],
+          onPressed: () => _toggleSaveShop(shop),
+        ),
+        onTap: () => _focusOnShop(shop),
       ),
     );
   }
-}
 
-// ---------------- ShopCard ----------------
-class ShopCard extends StatelessWidget {
-  final String name;
-  final String type;
-  final String distance;
-  final double rating;
-  final bool isOpen;
-  final String imagePath;
+  void _focusOnShop(dynamic shop) {
+    final lat = shop['lat'];
+    final lon = shop['lon'];
 
-  const ShopCard({
-    super.key,
-    required this.name,
-    required this.type,
-    required this.distance,
-    required this.rating,
-    required this.isOpen,
-    required this.imagePath,
-  });
+    if (_mapController != null && lat != null && lon != null) {
+      _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: LatLng(lat, lon),
+            zoom: 17,
+          ),
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      elevation: 3,
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.asset(
-                imagePath,
-                width: 80,
-                height: 80,
-                fit: BoxFit.cover,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          name,
-                          style: const TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: isOpen ? Colors.green[100] : Colors.grey[300],
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          isOpen ? "Open" : "Closed",
-                          style: TextStyle(
-                            color: isOpen ? Colors.green : Colors.black54,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(Icons.star, color: Colors.orange[400], size: 16),
-                      const SizedBox(width: 4),
-                      Text(rating.toString()),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(type, style: const TextStyle(color: Colors.black54)),
-                  Text(distance, style: const TextStyle(color: Colors.black54)),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      TextButton.icon(
-                        onPressed: () {},
-                        icon: const Icon(Icons.call, size: 18),
-                        label: const Text("Call"),
-                      ),
-                      TextButton.icon(
-                        onPressed: () {},
-                        icon: const Icon(Icons.language, size: 18),
-                        label: const Text("Website"),
-                      ),
-                      TextButton.icon(
-                        onPressed: () {},
-                        icon: const Icon(Icons.directions, size: 18),
-                        label: const Text("Directions"),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            )
-          ],
+    super.build(context);
+
+    final initialLatLng = _currentLocation != null
+        ? LatLng(_currentLocation!.latitude, _currentLocation!.longitude)
+        : const LatLng(14.5995, 120.9842);
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF10B981),
+        title: const Text("Nearby Repair Shops",
+            style: TextStyle(color: Colors.white)),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.star, color: Colors.white),
+            tooltip: "Saved Shops",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SavedShopsScreen()),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.filter_alt, color: Colors.white),
+            onPressed: _showFilterDialog,
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _nearbyShops.isEmpty
+          ? const Center(
+        child: Text(
+          "No repair shops found nearby.",
+          style: TextStyle(fontSize: 16, color: Colors.black54),
         ),
+      )
+          : Stack(
+        children: [
+          GoogleMap(
+            initialCameraPosition:
+            CameraPosition(target: initialLatLng, zoom: 14),
+            markers: _markers,
+            myLocationEnabled: true,
+            myLocationButtonEnabled: true,
+            onMapCreated: (c) => _mapController = c,
+          ),
+          DraggableScrollableSheet(
+            initialChildSize: 0.25,
+            minChildSize: 0.2,
+            maxChildSize: 0.65,
+            builder: (context, scrollController) {
+              return SafeArea(
+                top: false,
+                child: Container(
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    borderRadius:
+                    BorderRadius.vertical(top: Radius.circular(16)),
+                    boxShadow: [
+                      BoxShadow(
+                          color: Colors.black26,
+                          blurRadius: 8,
+                          offset: Offset(0, -2))
+                    ],
+                  ),
+                  child: Column(
+                    children: [
+                      Container(
+                        width: 45,
+                        height: 6,
+                        margin: const EdgeInsets.only(top: 10, bottom: 5),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[400],
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      Expanded(
+                        child: ListView.builder(
+                          controller: scrollController,
+                          padding: EdgeInsets.only(
+                            bottom:
+                            MediaQuery.of(context).padding.bottom +
+                                80,
+                            top: 8,
+                          ),
+                          itemCount: _nearbyShops.length,
+                          itemBuilder: (context, i) =>
+                              _buildShopCard(_nearbyShops[i]),
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
       ),
     );
   }
