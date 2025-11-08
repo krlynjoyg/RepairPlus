@@ -29,7 +29,7 @@ class _FindGuideScreenState extends State<FindGuideScreen> {
 
   List<Map<String, dynamic>> externalResults = [];
 
-  final String youtubeApiKey = "AIzaSyDHPDJWZqdS8px7AWGW7avsSZU4mHRtz_k";
+  final String youtubeApiKey = "secret";
 
   StreamSubscription<DocumentSnapshot>? _savedListener;
 
