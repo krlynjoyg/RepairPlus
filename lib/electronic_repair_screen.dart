@@ -30,7 +30,7 @@ class _ElectronicRepairScreenState extends State<ElectronicRepairScreen>
   // Tutorials
   List<NormalizedTutorial> _tutorials = [];
   bool _isLoadingTutorials = false;
-  final String youtubeApiKey = 'AIzaSyDHPDJWZqdS8px7AWGW7avsSZU4mHRtz_k';
+  final String youtubeApiKey = 'secret';
 
   // Search
   final TextEditingController _searchController = TextEditingController();
