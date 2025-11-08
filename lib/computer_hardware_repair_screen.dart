@@ -31,7 +31,7 @@ class _ComputerHardwareRepairScreenState
   // Tutorials
   List<NormalizedTutorial> _tutorials = [];
   bool _isLoadingTutorials = false;
-  final String youtubeApiKey = 'AIzaSyDHPDJWZqdS8px7AWGW7avsSZU4mHRtz_k';
+  final String youtubeApiKey = 'secret';
 
   final TextEditingController _searchController = TextEditingController();
 
