@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class YouTubeApiService {
-  final String apiKey = 'AIzaSyDHPDJWZqdS8px7AWGW7avsSZU4mHRtz_k';
+  final String apiKey = 'secret';
   final String baseUrl = 'https://www.googleapis.com/youtube/v3/search';
 
   Future<List<Map<String, dynamic>>> fetchTutorials(String query) async {
