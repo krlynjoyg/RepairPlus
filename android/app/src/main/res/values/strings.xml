@@ -4,6 +4,6 @@
 
     <!-- 🔹 Your Facebook App Info -->
     <string name="facebook_app_id">816203184706219</string>
-    <string name="facebook_client_token">bdd3fe4b15c85603bd412fb6d250dcf0</string>
+    <string name="facebook_client_token">secret</string>
     <string name="fb_login_protocol_scheme">fb816203184706219</string>
 </resources>
