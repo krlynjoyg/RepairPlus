@@ -1,16 +1,12 @@
-# repair_plus_one
+# RepairPlus: Smart Repair Assistance App
 
-A new Flutter project.
+## Overview
+RepairPlus helps users find repair tutorials and nearby repair shops using Flutter and Firebase.
 
-## Getting Started
+## Tech Stack
 
-This project is a starting point for a Flutter application.
+- Flutter (Frontend)
+- Firebase Firestore (Database)
+- Firebase Authentication
+- Google Maps API, iFixit API, YouTube Data API
 
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
