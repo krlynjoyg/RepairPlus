@@ -30,7 +30,7 @@ class _TabletsIpadsRepairScreenState extends State<TabletsIpadsRepairScreen>
   // ===================== Tutorials =====================
   List<NormalizedTutorial> _tutorials = [];
   bool _isLoadingTutorials = false;
-  final String youtubeApiKey = 'YOUR_YOUTUBE_API_KEY';
+  final String youtubeApiKey = 'secret';
   final TextEditingController _searchController = TextEditingController();
   List<String> _savedTutorialIds = [];
 
